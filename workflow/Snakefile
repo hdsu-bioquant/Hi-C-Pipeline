@@ -1,0 +1,43 @@
+# =============================================================================
+#  Hi-C end-to-end pipeline  (hg38, neural-crest time-course)
+#
+#  FASTQ -> bwa-mem(-SP5M) -> pairtools -> valid .pairs
+#        -> cooler .mcool (ICE) + Juicer .hic (KR/SCALE)
+#        -> TADs (insulation + Arrowhead)
+#        -> loops (HiCCUPS + APA + HiCCUPSDiff)
+#        -> A/B compartments (cooltools eigs-cis, GC-phased, + saddle)
+#
+#  Run (dry):   snakemake -n --configfile config/config.yaml
+#  Run (slurm): snakemake --profile profiles/slurm --configfile config/config.yaml
+#
+#  Rationale for every choice: docs/Hi-C_pipeline_explained.md
+# =============================================================================
+from snakemake.utils import min_version
+min_version("8.0")
+
+configfile: "config/config.yaml"
+
+include: "rules/common.smk"
+include: "rules/genome_prep.smk"
+include: "rules/qc.smk"
+include: "rules/align.smk"
+include: "rules/pairs.smk"
+include: "rules/matrix.smk"
+include: "rules/hic_qc.smk"
+include: "rules/tads.smk"
+include: "rules/loops.smk"
+include: "rules/compartments.smk"
+# RSchwarz 2026-06-10 — new optional modules
+include: "rules/stripes.smk"
+include: "rules/differential.smk"
+include: "rules/higlass.smk"
+
+rule all:
+    input:
+        targets()
+
+onstart:
+    print("=" * 70)
+    print(f"Hi-C pipeline | genome={GENOME} | samples={', '.join(SAMPLES)}")
+    print(f"Results -> {RESULTS}")
+    print("=" * 70)

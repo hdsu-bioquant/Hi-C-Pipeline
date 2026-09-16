@@ -1,0 +1,42 @@
+# profiles/slurm/config.yaml — Snakemake 8/9 SLURM profile for the Hi-C pipeline (GENERAL TEMPLATE)
+# Usage:  snakemake --profile profiles/slurm --configfile config/config.yaml
+#
+# Adapt every line marked  <<< EDIT >>>  to your cluster before the first run.
+# (The profile of the validated BioQuant run is kept locally in profiles/slurm_hNCC/,
+#  which is excluded from the repository.)
+
+executor: slurm
+jobs: 50
+latency-wait: 120
+rerun-incomplete: true
+printshellcmds: true
+rerun-triggers: "mtime"
+
+# Software deployment: Apptainer/Singularity container images ONLY (no conda).
+# Every rule declares a `container:` (see workflow/rules/common.smk IMG_*).
+# Bind mounts: list every directory the containers must be able to see — the
+# raw FASTQs, the genome (+ bwa index) and the Juicer jar, the pipeline
+# directory and the results directory (`datapath` in config/config.yaml).
+# Apptainer usually binds $HOME, /tmp and the current working directory on its
+# own; network shares and scratch file systems must be listed here explicitly.
+software-deployment-method:
+  - apptainer
+apptainer-args: "--bind /path/to/your/data --bind /path/to/your/genome --bind /path/to/your/tools --bind /path/to/your/results"   # <<< EDIT >>>
+
+# Where SLURM stdout/stderr of submitted jobs go (absolute path)
+slurm-logdir: "/path/to/your/results/logs/slurm"                    # <<< EDIT >>>
+slurm-keep-successful-logs: true
+
+# Per-rule resources (mem_mb / runtime / threads) are set in the rules; these are
+# fallback defaults for anything unspecified.
+default-resources:
+  - mem_mb=8000
+  - runtime=240            # minutes
+  - slurm_partition=single                                            # <<< EDIT >>>  your SLURM partition
+  # Extra sbatch options, e.g. to exclude nodes with a broken shared-storage mount:
+  #   - slurm_extra="--exclude=node01,node02"
+  # If your storage is Kerberos-authenticated (as bq-storage at BioQuant), jobs that
+  # die at launch with "couldn't chdir ... TaskProlog failed" (exit 0:53, 0 s elapsed,
+  # no log) almost always mean an EXPIRED TICKET, not a broken node: run `kinit -r 7d`
+  # before launching and keep a renewer alive (README §0.5), or wrap the controller
+  # in `krenew -K 60 -- snakemake ...`.

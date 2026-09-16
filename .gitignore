@@ -1,0 +1,24 @@
+# --- pipeline outputs and run state: never commit ---
+results/
+logs/
+.snakemake/
+.R_libs/
+
+# --- caches written by containers / tools into the pipeline root ---
+.cache/
+.config/
+.java/
+__pycache__/
+*.pyc
+
+# --- ad-hoc artefacts ---
+dag.pdf
+rulegraph.pdf
+
+# --- site-specific files kept locally only (BioQuant hNCC run) ---
+profiles/slurm_hNCC/
+/config/config_hNCC.yaml
+/config/samples_hNCC.tsv
+/docs/
+/README copy.md
+/workflow/rules/envs/

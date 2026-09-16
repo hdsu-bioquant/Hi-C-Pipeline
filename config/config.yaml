@@ -1,0 +1,278 @@
+#==============================================================================#
+#                   Hi-C end-to-end pipeline — main configuration               #
+#                                                                              #
+#  FASTQ -> bwa-mem -> pairtools (valid pairs) -> cooler .mcool + Juicer .hic   #
+#         -> TADs (insulation + Arrowhead + hicFindTADs)                        #
+#         -> loops (chromosight, CPU; HiCCUPS on GPU clusters)                  #
+#         -> A/B compartments (cooltools eigs-cis, GC-phased, + saddle)          #
+#                                                                              #
+#  THIS FILE IS THE GENERAL TEMPLATE.                                           #
+#  Every entry marked  <<< EDIT >>>  must be adapted to your data / site before #
+#  the first run (validate_inputs stops the pipeline with a clear message if    #
+#  any of them is missing). All tool parameters below are the validated         #
+#  defaults and can stay as they are.                                           #
+#                                                                              #
+#  A complete worked example — the validated hNCC time-course on BioQuant — is  #
+#  kept in config/config_hNCC.yaml together with config/samples_hNCC.tsv.      #
+#  See README.md (§0.6, §2, §3) and docs/Hi-C_pipeline_explained.md.            #
+#==============================================================================#
+
+#------------------------------------------------------------------------------#
+#  Sample sheet                                                                 #
+#------------------------------------------------------------------------------#
+# Tab-separated, WITH header. Columns: sample  timepoint  r1  r2  [lane] [condition] [replicate]
+#   sample     library name (unique; one matrix per sample)
+#   timepoint  free-text grouping label (optional; reporting only)
+#   r1 / r2    ABSOLUTE paths to the paired FASTQs (.fastq.gz / .fq.gz)
+#   lane       optional: one row per lane with the same `sample`; lanes are
+#              aligned separately and merged before dedup
+#   condition / replicate  optional: only used by the differential module
+# config/samples.tsv as shipped is a two-row placeholder — replace its rows.
+samples_tsv: config/samples.tsv                                        # <<< EDIT >>> (the file's contents)
+
+# Base output directory (everything the pipeline writes lives here). Use an
+# absolute path inside a directory that is bind-mounted in profiles/slurm/config.yaml.
+datapath: /path/to/your/results                                        # <<< EDIT >>>
+
+# Fail fast at startup if any genome file, the Juicer jar, or any FASTQ in the
+# sample sheet is missing (recommended). Set false to skip the check.
+validate_inputs: true
+
+#------------------------------------------------------------------------------#
+#  Reference genome                                                             #
+#------------------------------------------------------------------------------#
+genome: hg38
+genomes:
+  hg38:
+    # Genome FASTA (the bwa index is built NEXT TO IT by rule bwa_index on the
+    # first run, ~1-2 h; the directory must therefore be writable once).
+    fasta: /path/to/your/genome/GRCh38.primary_assembly.genome.fa       # <<< EDIT >>>
+    # Two-column chrom.sizes (name <TAB> length). Used by pairtools/cooler/juicer.
+    # Must contain every chromosome listed in analysis_chroms.
+    chrom_sizes: /path/to/your/genome/hg38.chrom.sizes                  # <<< EDIT >>>
+    # Juicer genome ID (only used to label the .hic; chrom.sizes is what matters).
+    juicer_genome_id: hg38
+    # Restriction enzyme / kit used to make the library (metadata for reporting only;
+    # this pipeline derives contacts from the ligation junction, not a digest file).
+    # e.g. "MboI", "DpnII", "HindIII", "Arima (DpnII+HinfI)". Fill in if known.
+    restriction_enzyme: "unspecified"
+    # Chromosomes carried into TAD/loop/compartment analysis (skip chrM, scaffolds, chrY optional).
+    # Handed to cooltools --view so eigs/insulation/saddle ignore everything else.
+    analysis_chroms: ["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9",
+                      "chr10","chr11","chr12","chr13","chr14","chr15","chr16","chr17",
+                      "chr18","chr19","chr20","chr21","chr22","chrX"]
+  # For another assembly add a block like the one above (e.g. mm10 with chr1..chr19, chrX)
+  # and set `genome:` accordingly.
+
+#------------------------------------------------------------------------------#
+#  External tools                                                               #
+#------------------------------------------------------------------------------#
+# Juicer Tools jar (provides pre / arrowhead / hiccups / hiccupsdiff / apa).
+# Download juicer_tools.2.20.00.jar from https://github.com/aidenlab/Juicebox/releases
+# (needs Java 11+, provided by the eclipse-temurin:17 container).
+juicer_tools_jar: /path/to/your/tools/juicer_tools.2.20.00.jar          # <<< EDIT >>>
+
+#------------------------------------------------------------------------------#
+#  Which steps to run                                                           #
+#------------------------------------------------------------------------------#
+runrule:
+  fastqc        : true     # raw read QC
+  trim          : false    # adapter-only trimming with fastp (Hi-C usually needs NO trimming; see docs)
+  align_pairs   : true     # bwa-mem -SP5M | pairtools -> valid pairs
+  cooler        : true     # build balanced multi-resolution .mcool
+  hic           : true     # build Juicer .hic (needed for Arrowhead/HiCCUPS)
+  multiqc       : true     # aggregate FastQC + pairtools stats
+
+  # --- analysis modules ---
+  tads          : true     # insulation (cooltools) + Arrowhead (Juicer) [+ hicFindTADs] + agreement
+  loops         : true     # chromosight (CPU) [+ Mustache]; HiCCUPS + APA + HiCCUPSDiff on GPU clusters
+  compartments  : true     # cooltools eigs-cis (A/B), GC-phased, + saddle strength
+
+#------------------------------------------------------------------------------#
+#  Alignment (bwa mem, 4DN-style)                                               #
+#------------------------------------------------------------------------------#
+bwa:
+  # -S skip mate rescue, -P skip pairing, -5 5'-primary for chimeras, -M secondary marking.
+  # This exact flag set is the 4D Nucleome recommendation for Hi-C.
+  flags: "-SP5M"
+  threads: 16
+
+#------------------------------------------------------------------------------#
+#  pairtools (parse -> sort -> dedup -> select valid pairs)                      #
+#------------------------------------------------------------------------------#
+pairtools:
+  # 5unique = for multi-fragment "walks"/chimeric reads, keep the 5'-most unique
+  # alignment on each side (4DN default). Robust to ligation-junction reads.
+  walks_policy: "5unique"
+  max_inter_align_gap: 30
+  # Minimum mapping quality for a read end to be called "unique" (U). 30 is the
+  # 4DN / distiller / nf-core standard: it keeps confidently, uniquely placed ends
+  # and drops multi-mappers (which would otherwise pass as UU at low MAPQ and add
+  # spurious contacts). Lower it (e.g. 1) only if you deliberately want to keep
+  # lower-confidence alignments.
+  min_mapq: 30
+  # Valid pair types kept after dedup (unique-unique and unique-rescued).
+  select_expr: '(pair_type=="UU") or (pair_type=="UR") or (pair_type=="RU")'
+  sort_threads: 8
+  sort_mem: "20G"
+
+#------------------------------------------------------------------------------#
+#  Contact matrices                                                             #
+#------------------------------------------------------------------------------#
+matrix:
+  # Finest bin built by cooler; the .mcool pyramid is zoomed up from here.
+  base_resolution: 1000
+  # Resolution pyramid for the .mcool (all ICE-balanced by cooler zoomify --balance).
+  resolutions: [1000, 2000, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000]
+  # Resolutions written into the Juicer .hic (juicer_tools pre computes KR + SCALE).
+  hic_resolutions: [1000, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000]
+  # ICE balancing iteration cap (cooler zoomify --balance-args).
+  balance_max_iters: 1000
+  # Java heap for `juicer_tools pre` (.hic build). Raise for very deep libraries.
+  hic_java_mem: "64g"
+
+#------------------------------------------------------------------------------#
+#  Hi-C-specific QC (additive; reads the matrices/pairs, alters nothing)         #
+#------------------------------------------------------------------------------#
+qc:
+  contact_decay:   true     # P(s) contact-distance decay curve per sample + overlay plot
+  library_summary: true     # cross-sample table of dup rate / cis-trans / valid pairs
+  scaling_resolution: 10000 # resolution used for the P(s) curve
+
+#------------------------------------------------------------------------------#
+#  TAD calling                                                                  #
+#------------------------------------------------------------------------------#
+tads:
+  # --- insulation score (cooltools; Crane et al. 2015) -- PRIMARY recommendation ---
+  insulation_resolution: 10000
+  # Diamond-window sizes (bp). 100-500 kb is standard at 10 kb bins.
+  insulation_windows: [100000, 200000, 500000]
+  # Window used to derive the reported TAD/boundary BEDs.
+  insulation_primary_window: 200000
+  insulation_threshold: "Li"     # Li or Otsu automatic boundary-strength threshold
+  ignore_diags: 2
+
+  # --- Arrowhead (Juicer) -- orthogonal nested-domain caller ---
+  arrowhead_resolution: 10000
+  arrowhead_norm: "SCALE"        # SCALE (recommended) or KR
+  arrowhead_java_mem: "64g"
+
+  # --- HiCExplorer hicFindTADs (Ramirez et al. 2018) -- third caller ---
+  # Insulation-style score swept over diamond windows of size step*[min..max] *
+  # hicexplorer_resolution, with FDR control across windows (-> robust on
+  # moderately-sparse data). Set false to run in 2-caller mode (insulation + Arrowhead).
+  hicexplorer: true
+  hicexplorer_resolution: 10000  # bp; must be a resolution stored in the .mcool
+  hicexplorer_min_depth_mult: 3  # min diamond depth = res * this
+  hicexplorer_max_depth_mult: 10 # max diamond depth = res * this
+  hicexplorer_step_mult: 1       # window step       = res * this
+  hicexplorer_fdr: 0.05          # --thresholdComparisons (FDR)
+  hicexplorer_delta: 0.01        # --delta: min separation-score difference
+
+  # --- Cross-caller boundary agreement (per-sample + cross-sample summary) ---
+  # Two boundaries are counted as "agreeing" when their positions sit within
+  # ±agreement_slop_bp of each other. Default = the insulation_resolution
+  # (one 10 kb bin), which mirrors typical TAD-benchmark practice.
+  agreement_slop_bp: 10000
+
+#------------------------------------------------------------------------------#
+#  Loop / peak calling                                                          #
+#------------------------------------------------------------------------------#
+loops:
+  # HiCCUPS REQUIRES a CUDA GPU (jcuda compiles a PTX kernel via nvcc at start).
+  # On CPU-only clusters (e.g. the BioQuant `single` partition) keep hiccups: false
+  # and use chromosight (CPU-only, cooler-native, often more sensitive on
+  # moderate-depth data anyway). Flip hiccups: true on a GPU cluster.
+  hiccups: false
+  chromosight: true
+  chromosight_resolution: 10000
+  # ---- Mustache (Roayaei Ardakany et al. 2020) — optional second CPU loop caller ----
+  # Scale-space pixel detection on the .mcool; complements chromosight's
+  # template matching (different loop populations). With >= 2 callers enabled the
+  # loop_caller_agreement rules produce a consensus. Opt-in; not yet validated.
+  mustache: false
+  mustache_resolution: 10000
+  mustache_pthreshold: 0.1        # FDR threshold passed as -pt
+  mustache_sthreshold: 0.88       # sparsity threshold (-st)
+  mustache_norm: "weight"         # cooler's stored ICE weight column
+  # ---- Cross-caller loop agreement -----------------------------------------
+  # Runs automatically when >= 2 loop callers are enabled.  Anchors must match
+  # within +/- agreement_slop_bp on BOTH ends to be considered the same loop.
+  agreement_slop_bp: 10000
+
+  # ---- HiCCUPS / APA / HiCCUPSDiff (only used when hiccups: true) ------------
+  resolutions: [5000, 10000]     # HiCCUPS -r
+  norm: "SCALE"
+  apa_resolution: 10000
+  hiccups_java_mem: "96g"
+  apa_java_mem: "16g"
+  # Differential loops between two samples (HiCCUPSDiff). Each entry = "A B"
+  # (loops of A relative to B), e.g.
+  #   - "treated control"
+  diff_pairs: []                                                       # <<< EDIT >>> (GPU clusters only)
+  diff_resolution: 10000
+  diff_java_mem: "32g"
+
+#------------------------------------------------------------------------------#
+#  A/B compartments (cooltools eigs-cis)                                        #
+#------------------------------------------------------------------------------#
+compartments:
+  resolution: 100000
+  # E1 is phased so that POSITIVE = A (active). "gc" uses GC content as the
+  # phasing track (high GC -> A). Most accepted, genome-agnostic choice.
+  phasing_track: "gc"
+  saddle: true                   # compute compartmentalization strength (saddle plot)
+  n_quantile_bins: 38            # saddle quantile bins (cooltools default-ish)
+  saddle_extreme_fraction: 0.2   # fraction of extreme bins forming each saddle corner
+
+#==============================================================================
+#  Optional modules (all OFF by default; see README §8)
+#==============================================================================
+
+# ----------------------------------------------------------------------------
+#  Stripenn -- architectural stripes (cohesin biology)
+#    Yoon et al. 2022, Nat Commun. Cohesin loop-extrusion snapshots.
+# ----------------------------------------------------------------------------
+stripes:
+  enabled: false              # set true to call stripes
+  resolution: 10000
+  norm: "weight"              # bins-table column holding the balancing weights;
+                              # cooler zoomify --balance (this pipeline) writes "weight"
+  canny: 2.0                  # Canny edge-detection threshold (Stripenn default)
+  max_pixel: 0.95             # max pixel value retained (Stripenn default)
+
+# ----------------------------------------------------------------------------
+#  Replicate-aware differential analysis
+#
+#  HiCRep    : pairwise stratum-adjusted correlation between any two samples.
+#              Runs for ANY pair (no replicate requirement).
+#  multiHiCcompare : differential bin pairs. REQUIRES `condition` column in
+#              samples.tsv AND >=2 conditions, each with >=2 replicates.
+#  dcHiC-style differential E1 : same replicate gating as above.
+#
+#  Sample-sheet schema -- when you want the *Compare/differential pieces to
+#  fire, add OPTIONAL columns to samples.tsv:
+#      sample   condition   replicate   r1   r2   [lane]
+#  When `condition` is absent or no condition has >=2 distinct samples,
+#  the multiHiCcompare and dchic rules are silently skipped.
+# ----------------------------------------------------------------------------
+differential:
+  hicrep:           false         # any-pair stratum-adjusted correlation
+  hicrep_resolution: 50000        # HiCRep is fine at coarser resolution
+  hicrep_smoothing_h: 5           # smoothing kernel (HiCRep parameter)
+  hicrep_max_distance_bp: 5000000 # max genomic distance to include
+
+  multihiccompare:  false         # differential bin pairs with replicates
+  multihiccompare_resolution: 100000
+  multihiccompare_fdr: 0.05
+
+  dchic:            false         # differential compartments with replicates
+  dchic_resolution: 100000
+
+# ----------------------------------------------------------------------------
+#  HiGlass -- interactive web viewer for the .mcool files
+#    Kerpedjiev et al. 2018, Genome Biol.
+# ----------------------------------------------------------------------------
+higlass:
+  enabled: false              # set true to build the higlass/ ingest manifest
+  port: 8989                  # local port for the launcher's HiGlass server
