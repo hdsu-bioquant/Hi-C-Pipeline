@@ -12,9 +12,6 @@
 #  any of them is missing). All tool parameters below are the validated         #
 #  defaults and can stay as they are.                                           #
 #                                                                              #
-#  A complete worked example — the validated hNCC time-course on BioQuant — is  #
-#  kept in config/config_hNCC.yaml together with config/samples_hNCC.tsv.      #
-#  See README.md (§0.6, §2, §3) and docs/Hi-C_pipeline_explained.md.            #
 #==============================================================================#
 
 #------------------------------------------------------------------------------#
